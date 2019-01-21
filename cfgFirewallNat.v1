@@ -1,0 +1,430 @@
+#!/bin/bash
+
+VERBOSE=1 # 0: no log messages, 1: diagnostic log output
+metaScriptName="cfgFirewallNat"
+version="v0.1"
+
+# Setting the filenames for firewall and port-forwarding rules
+defaultRulesFname="router.rules"
+portFWRules="portForwarding.rules"
+
+# Check user id for su priviledges
+user=`id -u`
+if [ $user != "0" ]; then
+        echo "Error: this script must be run as root" 1>&2
+        exit 1
+fi
+
+
+do_initialize ()
+{
+  # Load the homework configuration parameters
+  CONFIG_FILE="homework.conf"
+  if [ -r "$CONFIG_FILE" ]; then
+    . $CONFIG_FILE
+  else
+    echo "error: cfgFirewall could not read file CONFIG_FILE"
+    return 1
+  fi
+
+  if [ -r $portFWRules ]; then
+    [ $VERBOSE -eq 1 ] && echo "Port forwarding rules definition file detected"
+  fi
+
+  # Check the connection type and figure out the device name of the WAN interface
+  if [ \( "$HWR_CONNECTION_TYPE" = "cable" \) -o \( "$HWR_CONNECTION_TYPE" = "mpoa" \) ]; then
+    WAN_IFACE=$GATEWAY
+  elif [ \( "$HWR_CONNECTION_TYPE" = "pppoe" \) ]; then
+    WAN_IFACE=$PPPOE
+  else
+    return 1
+  fi 
+
+  # Configure the device name of the LAN interface (assuming that it is always bridged)
+  LAN_IFACE=$BRIDGE
+  [ $VERBOSE -eq 1 ] && echo "WAN interface: $WAN_IFACE and LAN interface: $LAN_IFACE"
+
+  return 0
+}
+
+
+# GENERATE THE NAT TABLE RULES
+do_generateNatDump()
+{
+  natRules="*nat\n\
+:PREROUTING ACCEPT [0:0]\n\
+:POSTROUTING ACCEPT [0:0]\n\
+:OUTPUT ACCEPT [0:0]\n\
+:zone_wan_prerouting - [0:0]\n\
+:zone_lan_prerouting - [0:0]\n\
+:prerouting_rule - [0:0]\n\
+:postrouting_rule - [0:0]\n\
+:zone_wan_nat - [0:0]\n\
+# Do Masquerade on the WAN interface \n\
+-A zone_wan_nat -o $WAN_IFACE -j MASQUERADE\n\
+-A PREROUTING -i $WAN_IFACE -j zone_wan_prerouting\n\
+-A PREROUTING -i $LAN_IFACE -j zone_lan_prerouting\n\
+-A PREROUTING -j prerouting_rule\n\
+# Port forwarding example\n\
+#-A zone_wan_prerouting -p tcp -m tcp --dport 22222 -j DNAT --to-destination 192.168.1.238:22\n"
+
+  portFWRulesCont=`cat ./$portFWRules > deleteme`
+  while read line; do
+    if [[ $line != \#* ]]; then
+      [ $VERBOSE -eq 1 ] && echo "Reading again port forwarding rule line: $line"
+      proto=`echo "$line" | awk '{ print $1 }'`
+      wandport=`echo "$line" | awk '{ print $2 }'`
+      lanaddr=`echo "$line" | awk '{ print $3 }'`
+      landport=`echo "$line" | awk '{ print $4 }'`
+      [ $VERBOSE -eq 1 ] && echo "Port forwarding rule is: proto=$proto WANdport=$wandport LanAddr=$lanaddr LanDport=$landport"
+      if [ -n $proto -a -n $wandport -a -n $lanaddr -a -n $landport ]; then
+	natRules="${natRules}-A zone_wan_prerouting -p $proto -m $proto --dport $wandport -j DNAT --to-destination $lanaddr:$landport\n"
+      fi
+    fi
+  done < deleteme
+
+  rm -f deleteme
+
+  natRules="${natRules}-A POSTROUTING -j postrouting_rule\n\
+-A POSTROUTING -j zone_wan_nat\n\
+COMMIT\n\n"
+ 
+  return 0
+}
+
+
+# GENERATE THE MANGLE TABLE RULES
+do_generateMangleDump()
+{
+  mangleRules="*mangle\n\
+:PREROUTING ACCEPT [0:0]\n\
+:INPUT ACCEPT [0:0]\n\
+:FORWARD ACCEPT [0:0]\n\
+:OUTPUT ACCEPT [0:0]\n\
+:POSTROUTING ACCEPT [0:0]\n"
+
+# ----------------------------------------
+#   Alex's suggestion for ADSL pppoe fix
+# ----------------------------------------
+#
+  if [ \( "$HWR_CONNECTION_TYPE" = "pppoe" \) ]; then
+    [ $VERBOSE -eq 1 ] && echo "Adding fix for DSL pppoe (clamp mss)"
+    mangleRules="${mangleRules}-A FORWARD -o $WAN_IFACE -p tcp --tcp-flags SYN,RST SYN -m tcpmss --mss 1400:65495 -j TCPMSS --clamp-mss-to-pmtu\n"
+  fi
+
+  mangleRules="${mangleRules}COMMIT\n\n"
+
+  return 0
+}
+
+
+# GENERATE THE FILTER TABLE RULES
+do_generateFilterDump()
+{
+  filterRules="*filter\n\
+:INPUT ACCEPT [0:0]\n\
+:FORWARD DROP [0:0]\n\
+:OUTPUT ACCEPT [0:0]\n\
+\n\
+# INPUT chains\n\
+:syn_flood - [0:0]\n\
+:input_rule - [0:0]\n\
+:input - [0:0]\n\
+:zone_lan - [0:0]\n\
+:input_lan - [0:0]\n\
+:zone_wan - [0:0]\n\
+:input_wan - [0:0]\n\
+\n\
+# FORWARD chains\n\
+:forwarding_rule - [0:0]\n\
+:forward - [0:0]\n\
+:zone_lan_forward - [0:0]\n\
+:zone_wan_forward - [0:0]\n\
+\n\
+# OUTPUT chains\n\
+:output - [0:0]\n\
+:output_rule - [0:0]\n\
+\n\
+#Generic FILER table chains\n\
+:zone_lan_ACCEPT - [0:0]\n\
+:zone_lan_DROP - [0:0]\n\
+:zone_lan_MSSFIX - [0:0]\n\
+:zone_lan_REJECT - [0:0]\n\
+:zone_wan_ACCEPT - [0:0]\n\
+:zone_wan_DROP - [0:0]\n\
+:zone_wan_MSSFIX - [0:0]\n\
+:zone_wan_REJECT - [0:0]\n\
+:reject - [0:0]\n\
+\n\
+# Rules in INPUT and input related chanes\n\
+-A INPUT -m state --state INVALID -j DROP\n\
+-A INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT\n\
+-A INPUT -i lo -j ACCEPT\n\
+-A INPUT -p tcp -m tcp --tcp-flags FIN,SYN,RST,ACK SYN -j syn_flood\n\
+-A INPUT -j input_rule\n\
+-A INPUT -j input\n\
+-A syn_flood -p tcp -m tcp --tcp-flags FIN,SYN,RST,ACK SYN -m limit --limit 25/sec --limit-burst 50 -j RETURN\n\
+-A syn_flood -j DROP \n\
+# input_rule is empty\n\
+-A input -i $LAN_IFACE -j zone_lan\n\
+-A input -i $WAN_IFACE -j zone_wan\n\
+-A zone_lan -j input_lan\n\
+-A zone_lan -j zone_lan_ACCEPT\n\
+# chain input_lan is empty\n\
+## Place here rules for accepting INPUT traffic from WAN\n\
+#e.g. -A zone_wan -p udp -m udp --dport 68 -j ACCEPT\n\
+-A zone_wan -j input_wan\n\
+-A zone_wan -j zone_wan_REJECT\n\
+\n\
+# Rules in FORWARD and forward related chains\n"
+
+# ----------------------------------------
+#   Dimos's suggestion for ADSL pppoe fix
+# ----------------------------------------
+#
+#  if [ \( "$HWR_CONNECTION_TYPE" = "pppoe" \) ]; then
+#    [ $VERBOSE -eq 1 ] && echo "Adding fix for DSL pppoe (clamp mss)"
+#    filterRules="${filterRules}-A FORWARD -j zone_wan_MSSFIX\n"
+#  fi
+
+filterRules="${filterRules}-A FORWARD -m state --state INVALID -j DROP\n\
+-A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT\n\
+-A FORWARD -j forwarding_rule\n\
+-A FORWARD -j forward\n\
+-A FORWARD -j reject\n\
+\n\
+# chain forwarding_rule is empty\n\
+-A forward -i $LAN_IFACE -j zone_lan_forward\n\
+-A forward -i $WAN_IFACE -j zone_wan_forward\n\
+-A zone_lan_forward -j zone_wan_ACCEPT\n\
+-A zone_lan_forward -j zone_lan_ACCEPT\n\
+#-A zone_lan_forward -j zone_lan_REJECT\n\
+# Place here rules for accepting FORWARD traffic from WAN\n\
+#e.g. -A zone_wan_forward -d 192.168.1.238/32 -p tcp -m tcp --dport 6667 -j ACCEPT\n"
+
+portFWRulesCont=`cat ./$portFWRules > deleteme`
+while read line; do
+  if [[ $line != \#* ]]; then
+    [ $VERBOSE -eq 1 ] && echo "Reading again port forwarding rule line: $line"
+    proto=`echo "$line" | awk '{ print $1 }'`
+    wandport=`echo "$line" | awk '{ print $2 }'`
+    lanaddr=`echo "$line" | awk '{ print $3 }'`
+    landport=`echo "$line" | awk '{ print $4 }'`
+    [ $VERBOSE -eq 1 ] && echo "Port forwarding rule is: proto=$proto WANdport=$wandport LanAddr=$lanaddr LanDport=$landport"
+    if [ -n $proto -a -n $wandport -a -n $lanaddr -a -n $landport ]; then
+      filterRules="${filterRules}-A zone_wan_forward -d $lanaddr/32 -p $proto -m $proto --dport $landport -j ACCEPT\n"
+    fi
+  fi
+done < deleteme
+
+rm -f deleteme
+
+filterRules="${filterRules}-A zone_wan_forward -j zone_wan_REJECT\n\
+# Rules in OUTPUT and output related chains\n\
+-A OUTPUT -m state --state INVALID -j DROP\n\
+-A OUTPUT -m state --state RELATED,ESTABLISHED -j ACCEPT\n\
+-A OUTPUT -o lo -j ACCEPT\n\
+-A OUTPUT -j output_rule\n\
+-A OUTPUT -j output\n\
+-A output -j zone_lan_ACCEPT\n\
+-A output -j zone_wan_ACCEPT\n\
+\n\
+# Rules for generic FILTER table chains\n\
+-A reject -p tcp -j REJECT --reject-with tcp-reset\n\
+-A reject -j REJECT --reject-with icmp-port-unreachable\n\
+-A zone_lan_ACCEPT -i $LAN_IFACE -j ACCEPT\n\
+-A zone_lan_ACCEPT -o $LAN_IFACE -j ACCEPT\n\
+-A zone_lan_DROP -i $LAN_IFACE -j DROP\n\
+-A zone_lan_DROP -o $LAN_IFACE -j DROP\n\
+-A zone_lan_MSSFIX -o $LAN_IFACE -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu\n\
+-A zone_lan_REJECT -i $LAN_IFACE -j reject\n\
+-A zone_lan_REJECT -o $LAN_IFACE -j reject\n\
+-A zone_wan_ACCEPT -i $WAN_IFACE -j ACCEPT\n\
+-A zone_wan_ACCEPT -o $WAN_IFACE -j ACCEPT\n\
+-A zone_wan_DROP -i $WAN_IFACE -j DROP\n\
+-A zone_wan_DROP -o $WAN_IFACE -j DROP\n\
+-A zone_wan_MSSFIX -o $WAN_IFACE -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu \n\
+-A zone_wan_REJECT -i $WAN_IFACE -j reject \n\
+-A zone_wan_REJECT -o $WAN_IFACE -j reject\n\
+COMMIT"
+
+
+  return 0
+}
+
+
+do_generate_dump()
+{
+  timestamp=`date`
+  iptablesRulesDump="# Generated by cfgFirewallNat at $timestamp\n"
+  
+  do_generateNatDump
+  [ $? -ne 0 ] && return 1
+  [ $VERBOSE -eq 1 ] && echo "Generating NAT table rules: DONE"
+
+  do_generateMangleDump
+  [ $? -ne 0 ] && return 1
+  [ $VERBOSE -eq 1 ] && echo "Generating MANGLE table rules: DONE"
+ 
+  do_generateFilterDump
+  [ $? -ne 0 ] && return 1
+  [ $VERBOSE -eq 1 ] && echo "Generating FILTER table rules: DONE"
+
+  iptablesRulesDump="${iptablesRulesDump}\n${natRules}\n${mangleRules}\n${filterRules}"
+
+  return 0
+}
+
+
+do_resetFirewallNat()
+{
+  sh -c "iptables -F && iptables -X && iptables -t nat -F && iptables -t nat -X && iptables -t mangle -F && iptables -t mangle -X && iptables -P INPUT ACCEPT && iptables -P FORWARD ACCEPT && iptables -P OUTPUT ACCEPT"
+
+  [ $? -ne 0 ] && return 1
+  
+  [ $VERBOSE -eq 1 ] && echo "The firewall and nat rules have been reset successfully."
+
+  return 0
+}
+
+
+do_validate_rulesFile()
+{
+  if [ -z "$1" ]; then
+    [ $VERBOSE -eq 1 ] && echo "Error: do_validate_rulesFile requires one argument (a filename)"
+    return 1
+  fi
+
+  if [ -r $1 ]; then
+    result=`iptables-apply -t 0 $1 2>&1`
+    [ $VERBOSE -eq 1 ] && echo -e "=== iptables-apply result message ===\n$result\n===================================="
+    result=`echo $result | grep failed | wc -l`
+    if [ "$result" = "1" ]; then
+      return 1
+    fi
+  else
+    return 1
+  fi
+
+  [ $VERBOSE -eq 1 ] && echo "The firewall rules file \"$1\" was validated successfully."
+  return 0
+}
+
+
+do_generate_rulesFile()
+{
+  if [ -z "$1" ]; then
+    [ $VERBOSE -eq 1 ] && echo "Error: do_generate_rulesFile requires one argument (a filename)"
+    return 1
+  fi
+
+  do_generate_dump
+  [ $? -ne 0 ] && return 1
+
+  [ $VERBOSE -eq 1 ] && echo "Creating file: $1"
+  echo -e $iptablesRulesDump > $1
+  [ $VERBOSE -eq 1 ] && echo "The firewall rules file \"$1\" was generated successfully."
+
+  return 0
+}
+
+
+
+do_apply_rulesFile()
+{
+  if [ -z "$1" ]; then
+    [ $VERBOSE -eq 1 ] && echo "Error: do_apply_rulesFile requires one argument (a filename)"
+    return 1
+  fi
+
+  if [ -r $1 ]; then
+    do_validate_rulesFile $1
+    [ $? -ne 0 ] && return 1
+    do_resetFirewallNat
+    [ $? -ne 0 ] && return 1
+    iptables-restore $1
+    [ $? -ne 0 ] && return 1
+  else
+    [ $VERBOSE -eq 1 ] && echo "Error: function do_apply_rulesFile could not read file $rulesFile"
+    return 1
+  fi
+  
+  [ $VERBOSE -eq 1 ] && echo "The firewall rules file \"$1\" was applied successfully."
+  return 0
+}
+
+do_print_help()
+{
+  echo -e "Firewall and NAT configuration script (version $version)\nUsage:\t$metaScriptName [COMMAND [filename]] \n\nCommands:\n\
+  ----\t If no command is specified, then it generates the firewall and nat rules and writes a dump to \"$defaultRulesFname\".
+  load\t Loads, verifies and applies the rules found in the specified \"filename\".\n\
+  dump\t Generates the firewall and nat rules and writes a dump to the specified \"filename\". If no \"filename\" is given, it dumps rules to \"$defaultRulesFname\".\n\
+  reset\t Resets the firewall and nat rules to system defaults. The default policy is: ALLOW all INPUT/FORWARD/OUTPUT traffic, NO masquerade.\n\
+  print\t Generates the firewall and nat rules and writes a dump to standard output.\n\
+  help\t Prints this menu.\n"
+}
+
+
+print_and_die()
+{
+  echo -e $1
+  exit 1
+}
+
+
+
+
+# Here is the main execution section
+
+if [ -z "$1" ]; then
+  do_initialize
+  [ $? -ne 0 ] && print_and_die "Error: failed to initialize"
+  do_generate_rulesFile $defaultRulesFname
+  [ $? -ne 0 ] && print_and_die "Error: coudln't generate rules file $defaultRulesFname"
+  do_apply_rulesFile $defaultRulesFname
+  [ $? -ne 0 ] && print_and_die "Error: failed to apply rules file $defaultRulesFname"
+else
+  case $1 in
+  load)
+    if [ -z "$2" ]; then
+      print_and_die "Usage: $metaScriptName load FILENAME"
+    fi
+    do_initialize
+    [ $? -ne 0 ] && print_and_die "Error: failed to initialize"
+    do_apply_rulesFile $2
+    [ $? -ne 0 ] && print_and_die "Error: failed to apply rules file $2"
+    ;;
+  dump)
+    do_initialize
+    [ $? -ne 0 ] && print_and_die "Error: failed to initialize"
+    if [ -z "$2" ]; then
+      do_generate_rulesFile $defaultRulesFname
+      [ $? -ne 0 ] && print_and_die "Error: coudln't generate rules file $defaultRulesFname"
+    else
+      do_generate_rulesFile $2
+      [ $? -ne 0 ] && print_and_die "Error: coudln't generate rules file $2"
+    fi
+    ;;
+  reset)
+    do_initialize
+    [ $? -ne 0 ] && print_and_die "Error: failed to initialize"
+    do_resetFirewallNat
+    [ $? -ne 0 ] && print_and_die "Error: failed to reset firwall and nat"
+    ;;
+  print)
+    do_initialize
+    [ $? -ne 0 ] && print_and_die "Error: failed to initialize"
+    do_generate_dump
+    [ $? -ne 0 ] && print_and_die "Error: failed to generate rules dump"
+    echo -e "\n$iptablesRulesDump\n"
+    ;;
+  help)
+    do_print_help
+    ;;
+  *)
+    print_and_die "Usage: $metaScriptName COMMAND\nwhere COMMAND can be an empty argument or \"load\" or \"dump\" or \"reset\" or \"print\" or \"help\"" 1>&2
+    ;;
+  esac
+fi
+
+exit 0

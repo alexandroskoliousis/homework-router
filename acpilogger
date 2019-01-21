@@ -1,0 +1,42 @@
+#!/bin/bash
+#
+# Log ACPI events
+#
+
+HWR_CONFIG_FILE="homework.conf"
+[ -r "$HWR_CONFIG_FILE" ] && . $HWR_CONFIG_FILE
+
+perror () {
+	echo "$@"
+	exit 1
+}
+
+[ ! -p acpf ] && perror "[acpi] I/O error"
+[ ! -p sysf ] && perror "[acpi] I/O error"
+
+while read e; do
+
+$HWR_VERBOSE && echo "[acpi] \"$e\""
+
+s=`echo "$e" | awk '{ print $2 }'`
+i=`echo "$e" | awk '{ print $3 }'`
+j=`echo "$e" | awk '{ print $4 }'`
+
+if [ "$s" = "AC0" ]; then
+	if [ "$i" = "00000080" -a "$j" = "00000000" ]; then
+		echo "insert into Sys values (\"EAC\")" > sysf
+	fi
+elif [ "$s" = "PWRF" ]; then
+	if [ "$i" = "00000080" ]; then
+		echo "insert into Sys values (\"EBTN\")" > sysf
+	fi
+elif [ "$s" = "ATKD" ]; then
+	if [ "$i" = "00000010" ]; then
+		echo "insert into Sys values (\"ERF\")" > sysf
+	fi
+fi
+
+done < acpf
+
+exit 0
+

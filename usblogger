@@ -1,0 +1,13 @@
+#!/bin/bash
+#
+# Log UDEV/USB events
+#
+
+[ ! -p sysf ] && (
+	echo "[usblogger] I/O error"
+	exit 1
+) || (
+	echo "insert into Sys values (\"USB\")" > sysf
+	exit 0
+)
+

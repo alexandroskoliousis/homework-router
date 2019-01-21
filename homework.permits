@@ -1,0 +1,66 @@
+#!/bin/bash
+#
+
+isvalid () {
+	r=0
+	c=0
+	mac=$1
+	for i in $(echo $mac | tr ":" "\n"); do
+		case $i in
+		""|*[!0-9a-fA-F]*)
+			r=1
+			break
+			;;
+		??) 
+			;;
+		*)
+			r=1
+			break
+			;;
+		esac
+		c=$(( $c + 1 ))
+	done
+	if [ $r -eq 0 ]; then
+		[ $c -ne 6 ] && r=1
+	fi
+	return $r
+}
+
+[ $# -ne 1 ] && (
+	echo "usage: homework.permits [device name or MAC address]"
+	exit 1
+)
+
+case "$1" in
+"iPhone")
+curl --noproxy localhost -X GET -G http://localhost:8080/control/device/status -d command=permit -d macAddress=00:26:B0:5D:97:59
+;;
+"iPad")
+curl --noproxy localhost -X GET -G http://localhost:8080/control/device/status -d command=permit -d macAddress=78:CA:39:DC:9D:0F
+;;
+"iMac")
+curl --noproxy localhost -X GET -G http://localhost:8080/control/device/status -d command=permit -d macAddress=00:14:51:E7:F1:E2
+;;
+"Anandha")
+curl --noproxy localhost -X GET -G http://localhost:8080/control/device/status -d command=permit -d macAddress=00:1c:b3:b4:a8:f9
+;;
+"Dimos")
+curl --noproxy localhost -X GET -G http://localhost:8080/control/device/status -d command=permit -d macAddress=00:24:d7:17:41:6c
+;;
+"jMac")
+curl --noproxy localhost -X GET -G http://localhost:8080/control/device/status -d command=permit -d macAddress=00:03:93:ED:9F:7E
+;;
+"Iliana")
+curl --noproxy localhost -X GET -G http://localhost:8080/control/device/status -d command=permit -d macAddress=00:23:12:05:23:b6
+;;
+*)
+isvalid $1
+if [ $? -ne 0 ]; then
+	echo "Invalid address: $1"
+	exit 1
+fi
+curl --noproxy localhost -X GET -G http://localhost:8080/control/device/status -d command=permit -d macAddress=$1
+;;
+esac
+exit 0
+

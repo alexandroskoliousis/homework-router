@@ -1,0 +1,10 @@
+# Port forwarding rules
+#
+# Syntax format:
+#
+# "PROTOCOL" "INCOMING PORT" "LAN DESTINATION ADDRESS" "LAN DESTINATION PORT"
+#
+# For example:
+#
+# tcp 2222 192.168.0.65 22
+# tcp   80 192.168.0.10 80

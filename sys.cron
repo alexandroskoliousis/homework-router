@@ -1,0 +1,16 @@
+#
+# usage: sys.sh [limit] [username] [service]
+#
+# Beyond the 'limit', a notification will be sent to
+# 'username' via 'service'.
+#
+# To disable notifications all together, do not spe-
+# cify any arguments. Then the results are only log-
+# ged to a file.
+#
+# Or, to send an e-mail to user 'administrator' when
+# 80% of memory or disk is used, run as
+#
+# sys.sh 80 administrator mail
+#
+@daily /home/homeuser/sys.sh
